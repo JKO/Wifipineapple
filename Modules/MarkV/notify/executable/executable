@@ -1,0 +1,166 @@
+#!/bin/sh
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/sd/lib:/sd/usr/lib
+export PATH=$PATH:/sd/usr/bin:/sd/usr/sbin
+
+MYPATH="/pineapple/components/infusions/notify/includes/"
+
+# EMAIL
+NOTIFICATION_EMAIL=`cat ${MYPATH}infusion.conf | grep "notification_email" | awk -F = '{print $2}'`
+TO=`cat ${MYPATH}infusion.conf | grep "to_email" | awk -F = '{print $2}'`
+FROM=`cat ${MYPATH}infusion.conf | grep "from_email" | awk -F = '{print $2}'`
+BIN=msmtp
+
+# PUSH
+NOTIFICATION_PUSH=`cat ${MYPATH}infusion.conf | grep "notification_push" | awk -F = '{print $2}'`
+APP_TOKEN=`cat ${MYPATH}infusion.conf | grep "apptoken" | awk -F = '{print $2}'`
+USER_KEY=`cat ${MYPATH}infusion.conf | grep "userkey" | awk -F = '{print $2}'`
+
+# OTHER
+NOTIFICATION_TYPE=""
+TITLE="Pineapple Notify"
+PRIORITY=0
+MESSAGE="Default message"
+
+send_email_notification ()
+{
+	echo -e "To: ${TO}" > ${MYPATH}mail.tmp
+	echo -e "From: ${FROM}" >> ${MYPATH}mail.tmp
+	echo -e "Subject: ${TITLE}" >> ${MYPATH}mail.tmp
+	echo -e "Content-Type: text/plain" >> ${MYPATH}mail.tmp
+	echo -e "X-Priority: ${PRIORITY}" >> ${MYPATH}mail.tmp
+	echo -e "" >> ${MYPATH}mail.tmp
+	
+	echo -e ${MESSAGE} >> ${MYPATH}mail.tmp
+	
+	cat ${MYPATH}mail.tmp | ${BIN} -t
+
+	rm -rf ${MYPATH}mail.tmp
+}
+
+send_push_notification ()
+{
+	curl -s -k -F "token=${APP_TOKEN}" -F "user=${USER_KEY}" -F "title=${TITLE}" -F "message=${MESSAGE}" -F "priority=${PRIORITY}" https://api.pushover.net/1/messages.json >/dev/null 2>&1
+}
+
+checkReq ()
+{
+	# curl
+	check_curl=`which curl`
+	
+	if [ -z "${check_curl}" ]; then
+	   
+	   echo -e "[!] curl isn't installed"
+	   echo -e ""
+	   read -p "[?] Would you like to install it? [Y/N]: "
+	   
+	   if [[ "$REPLY" =~ ^[Yy]$ ]]; then 
+		   opkg update
+		   
+		   sd_available=`mount | grep "on /sd"`
+		   if [ -z "${sd_available}" ]; then
+			   opkg install curl
+		   else	
+			   opkg install curl --dest sd
+		   fi
+	   else
+		   exit
+	   fi
+	   
+	fi
+	
+	# msmtp
+	check_msmtp=`which msmtp`
+	
+	if [ -z "${check_msmtp}" ]; then
+	   
+	   echo -e "[!] msmtp isn't installed"
+	   echo -e ""
+	   read -p "[?] Would you like to install it? [Y/N]: "
+	   
+	   if [[ "$REPLY" =~ ^[Yy]$ ]]; then 
+		   opkg update
+		   
+		   sd_available=`mount | grep "on /sd"`
+		   if [ -z "${sd_available}" ]; then
+			   opkg install msmtp
+		   else	
+			   opkg install msmtp --dest sd
+		   fi
+	   else
+		   exit
+	   fi
+	   
+	fi
+}
+
+usage ()
+{
+	echo -e "Notify script version 1.0 by Whistle Master"
+	echo ""
+    echo "Usage : notify [-mntp]"
+    echo ""
+	echo "-m    message text"
+	echo "-n    (optional) notification type [email | push | both]"
+	echo "-t    (optional) message title (push) or subject (email)"
+	echo "-p    (optional) Low Priority (-1) Normal Priority (0) High Priority (1)"
+	echo ""
+	echo "Example : notify -n=\"push\" -t=\"Test\" -p=\"0\" -m=\"Test Message\""
+	echo ""
+    exit
+}
+
+checkReq
+
+if [ "$#" == "0" ]; then
+	usage
+fi
+
+while [ "$1" != "" ]; do
+    PARAM=`echo $1 | awk -F= '{print $1}'`
+    VALUE=`echo $1 | awk -F= '{print $2}'`
+    case $PARAM in
+        -n)
+            NOTIFICATION_TYPE=$VALUE
+            ;;
+        -t)
+            TITLE=$VALUE
+            ;;
+        -d)
+            DEVICE=$VALUE
+            ;;
+        -p)
+            PRIORITY=$VALUE
+            ;;
+        -m)
+            MESSAGE=$VALUE
+            ;;
+        *)
+            echo "ERROR: unknown parameter \"$PARAM\""
+            usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+if [ ! -z "$NOTIFICATION_TYPE" ]; then
+	
+	if [ "$NOTIFICATION_TYPE" == "push" ]; then
+			send_push_notification
+	elif [ "$NOTIFICATION_TYPE" == "email" ]; then
+			send_email_notification
+	elif [ "$NOTIFICATION_TYPE" == "both" ]; then
+			send_email_notification
+			send_push_notification
+	fi
+else
+	
+	if [ ! -z "$NOTIFICATION_EMAIL" ] && [ "$NOTIFICATION_EMAIL" == "1" ]; then		
+		send_email_notification
+	fi
+	
+	if [ ! -z "$NOTIFICATION_PUSH" ] && [ "$NOTIFICATION_PUSH" == "1" ]; then		
+		send_push_notification
+	fi
+fi

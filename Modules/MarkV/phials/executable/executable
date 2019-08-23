@@ -1,0 +1,756 @@
+#!/bin/bash
+
+# Phials by Whistle Master. v2
+
+infusions_list=()
+local_infusions_list=()
+
+getInfusionList ()
+{
+	unset infusions_list
+	unset infusions_list_tmp
+	
+	echo -e "[+] Downloading Infusions list..."
+	curl -s "http://wifipineapple.com/?downloads&list_infusions&mk5" > /tmp/infusions_list_tmp
+	
+	IFS=$'\n'
+	infusions_list_all=( $( cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -w name | sed 's/name|//g' | tr '\n' ' ' ) )
+	
+	IFS=$' '
+	for infusion_name in ${infusions_list_all[@]} ; do
+	
+		infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+		
+		if [ "$infusion_type" == "inf" ] || [ "$infusion_type" == "cli" ]; then
+			infusions_list_tmp=( "${infusions_list_tmp[@]}" "${infusion_name}" )
+		fi
+	done
+	
+	infusions_list=${infusions_list_tmp[@]}
+}
+
+getLocalInfusionList ()
+{
+	unset local_infusions_list
+	unset local_infusions_list_tmp
+	
+	echo -e "[+] Getting local Infusions list..."
+	
+	IFS=$'\n'
+	for infusion in $(find "/pineapple/components/infusions/" -mindepth 1 -maxdepth 1) ; do
+		infusion_name=`basename ${infusion}`
+		local_infusions_list_tmp=( "${local_infusions_list_tmp[@]}" "${infusion_name}" )
+	done
+	
+	local_infusions_list=${local_infusions_list_tmp[@]}
+}
+
+# ${destination} ${infusion_name} ${infusion_version}
+downloadInfusion ()
+{
+	echo -e "[+] Downloading ${2} version ${3} to destination ${destination}"
+	
+	if [ "$4" == "sys" ]; then
+		destination="internal"
+	else
+		destination=${1}
+	fi
+		
+	sh /pineapple/components/system/bar/files/downloader ${destination} ${2} ${3}
+}
+
+# ${destination} ${infusion_name} ${infusion_version} ${type}
+installInfusion ()
+{
+	checkInfusionInstalled ${2}
+	infusion_installed=$?
+	
+	if [ "$4" == "sys" ]; then
+		destination="internal"
+	else
+		destination=${1}
+	fi
+		
+	if [ "$infusion_installed" == 1 ]; then
+		echo -e "[!] Infusion ${2} is already installed..."
+	else
+		downloadInfusion ${1} ${2} ${3} ${4}
+		
+		echo -e "[+] Installing ${2} [$4] version ${3} to destination ${destination}"
+		sh /pineapple/components/system/bar/files/installer ${destination} ${2} ${3} ${4}
+	fi
+}
+
+# ${infusion_name} ${infusion_version}
+removeInfusion ()
+{
+	echo -e "[+] Removing ${1} version ${2}"
+	
+	if [ -d "/sd/infusions/${1}" ]; then
+		rm -rf /pineapple/components/infusions/${1}
+		rm -rf /sd/infusions/${1}
+	else
+		rm -rf /pineapple/components/infusions/${1}
+	fi
+}
+
+# ${infusion_name}
+checkInfusionExternal ()
+{	
+	check_infusion_external=0
+	
+	if [ -d "/sd/infusions/${1}" ]; then
+		check_infusion_external=1
+	else
+		check_infusion_external=0
+	fi
+	
+	return ${check_infusion_external}
+}
+
+# ${infusion_list} ${infusion_name}
+checkInfusionExist ()
+{
+	check_infusion_exist=0
+	
+	for check_infusion_name in ${1} ; do 
+		if [ "$check_infusion_name" == "${2}" ] ; then 
+			check_infusion_exist=1
+			break
+		fi
+	done
+	
+	return ${check_infusion_exist}
+}
+
+# ${infusion_name}
+checkInfusionInstalled ()
+{
+	if [ -d "/pineapple/components/infusions/${1}" ]; then
+		check_infusion_installed=1
+	else
+		check_infusion_installed=0
+	fi
+	
+	return ${check_infusion_installed}
+}
+
+listAllInfusions ()
+{
+	echo -e ""
+	
+	getInfusionList
+
+	echo -e "[-] Available Infusions list"
+	for infusion_name in ${infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+	echo -e ""
+	
+	getLocalInfusionList
+
+	echo -e "[-] Installed Infusions list"
+	for infusion_name in ${local_infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+	echo -e "\n[~] Done !\n"
+}
+
+removeInfusions ()
+{
+	echo -e "\n[~] Remove Infusions\n"
+
+	getLocalInfusionList
+	
+	echo -e "[-] Installed Infusions list"
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+	echo -e "\n"; read -p "[?] Select Infusion(s) to remove: "
+	
+	IFS=$' '
+	for infusion_name in $REPLY ; do
+		checkInfusionExist "${local_infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+	
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist locally..."
+		else
+			infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+			removeInfusion ${infusion_name} ${infusion_local_version}
+		fi
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+updateInfusions ()
+{ 
+	echo -e "\n[~] Update Infusions"
+	
+	getLocalInfusionList
+	getInfusionList
+	
+	outdated_infusions_list=()
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do
+		infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+		
+		infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+				
+		if [ "$infusion_version" != "$infusion_local_version" ]; then
+			outdated_infusions_list=( "${outdated_infusions_list[@]}" "${infusion_name}" )
+		fi
+	done
+	
+	if [ -z ${outdated_infusions_list} ]; then
+		echo -e "[-] No outdated Infusions"
+	else
+		echo -e "[-] Outdated Infusions list"
+		IFS=$' '
+		for infusion_name in ${outdated_infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+		echo -e "\n"; read -p "[?] Select Infusion(s) to update: "
+	
+		IFS=$' '
+		for infusion_name in $REPLY ; do
+
+			checkInfusionExist "${infusions_list[@]}" "${infusion_name}"
+			infusion_exist=$?
+			
+			if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+			then
+				infusion_handler="cli_handler"
+			else
+				infusion_handler="handler"
+			fi
+		
+			if [ "$infusion_exist" == 0 ]; then
+				echo -e "[!] Infusion ${infusion_name} does not exist remotely..."
+			else
+				infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+				
+				checkInfusionExternal ${infusion_name}
+				infusion_external=$?
+				if [ "$infusion_external" == 0 ]; then
+					infusion_local_destination="internal"
+				else
+					infusion_local_destination="sd"
+				fi
+			
+				infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+				infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+				
+				removeInfusion ${infusion_name} ${infusion_local_version}
+				installInfusion ${infusion_local_destination} ${infusion_name} ${infusion_version} ${infusion_type}
+			fi
+		
+		done
+	fi
+	
+	echo -e "[~] Done !\n"
+}
+
+moveInfusions ()
+{
+	echo -e "\n[~] Move Infusions\n"
+		
+	getLocalInfusionList
+
+	echo -e "[-] Installed Infusions list"
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+	echo -e "\n"; read -p "[?] Select Infusion(s) to move: "
+
+	IFS=$' '
+	for infusion_name in $REPLY ; do
+		checkInfusionExist "${local_infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist locally..."
+		else
+			checkInfusionExternal ${infusion_name}
+			infusion_external=$?
+			if [ "$infusion_external" == 0 ]; then
+				echo -e "[+] Moving ${infusion_name} to destination sd"
+				mv /pineapple/components/infusions/${infusion_name} /sd/infusions/
+				ln -s /sd/infusions/${infusion_name} /pineapple/components/infusions/${infusion_name}
+			else
+				echo -e "[+] Moving ${infusion_name} to destination internal"
+				rm /pineapple/components/infusions/${infusion_name}
+				mv /sd/infusions/${infusion_name} /pineapple/components/infusions/
+			fi
+		fi
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+installInfusions ()
+{
+	echo -e "\n[~] Install Infusions\n"
+
+	echo -e "[-] [i]nternal"
+	echo -e "[-] [s]d"
+	echo -e ""; read -p "[?] Select infusion(s) install destination: "
+	
+	if [[ "$REPLY" =~ ^[Ii]$ ]]; then infusion_destination="internal"
+	elif [[ "$REPLY" =~ ^[Ss]$ ]]; then infusion_destination="sd"
+	fi
+	
+	getInfusionList
+
+	echo -e "[-] Available Infusions list"
+	for infusion_name in ${infusions_list[@]} ; do echo -e "${infusion_name} \c"; done
+	
+	echo -e "\n"; read -p "[?] Select Infusion(s) to install to ${infusion_destination}: "
+	
+	IFS=$' '
+	for infusion_name in $REPLY ; do
+
+		checkInfusionExist "${infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist remotely..."
+		else			
+			infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+			infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+			
+			installInfusion ${infusion_destination} ${infusion_name} ${infusion_version} ${infusion_type}
+		fi
+		
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+# ${infusions_list} ${destination}
+installInfusionsList ()
+{
+	echo -e "\n[~] Install Infusions\n"
+	
+	infusions_list_to_install=${1}
+	infusion_destination=${2}
+	
+	getInfusionList
+	
+	IFS=$' '
+	for infusion_name in $infusions_list_to_install ; do
+
+		checkInfusionExist "${infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist remotely..."
+		else			
+			infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+			infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+			
+			installInfusion ${infusion_destination} ${infusion_name} ${infusion_version} ${infusion_type}
+		fi
+		
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+# ${infusions_list}
+updateInfusionsList ()
+{
+	echo -e "\n[~] Update Infusions\n"
+	
+	infusions_list_to_update=${1}
+	
+	getLocalInfusionList
+	
+	IFS=$' '
+	for infusion_name in $infusions_list_to_update ; do
+
+		checkInfusionExist "${local_infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist locally..."
+		else
+			infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+
+			checkInfusionExternal ${infusion_name}
+			infusion_external=$?
+			if [ "$infusion_external" == 0 ]; then
+				infusion_local_destination="internal"
+			else
+				infusion_local_destination="sd"
+			fi
+			
+			infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+			infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+			
+			removeInfusion ${infusion_name} ${infusion_local_version}
+			installInfusion ${infusion_local_destination} ${infusion_name} ${infusion_version} ${infusion_type}
+		fi
+		
+	done
+	
+	echo -e "[~] Done !\n"
+	
+}
+
+# ${infusions_list}
+moveInfusionsList ()
+{
+	echo -e "\n[~] Move Infusions\n"
+	
+	infusions_list_to_move=${1}
+	
+	getLocalInfusionList
+	
+	IFS=$' '
+	for infusion_name in $infusions_list_to_move ; do
+		checkInfusionExist "${local_infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist locally..."
+		else
+			checkInfusionExternal ${infusion_name}
+			infusion_external=$?
+			if [ "$infusion_external" == 0 ]; then
+				echo -e "[+] Moving ${infusion_name} to destination sd"
+				mv /pineapple/components/infusions/${infusion_name} /sd/infusions/
+				ln -s /sd/infusions/${infusion_name} /pineapple/components/infusions/${infusion_name}
+			else
+				echo -e "[+] Moving ${infusion_name} to destination internal"
+				rm /pineapple/components/infusions/${infusion_name}
+				mv /sd/infusions/${infusion_name} /pineapple/components/infusions/
+			fi
+		fi
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+# ${infusions_list}
+removeInfusionsList ()
+{
+	echo -e "\n[~] Remove Infusions\n"
+	
+	infusions_list_to_remove=${1}
+	
+	getLocalInfusionList
+	
+	IFS=$' '
+	for infusion_name in $infusions_list_to_remove ; do
+		checkInfusionExist "${local_infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist locally..."
+		else
+			infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+
+			removeInfusion ${infusion_name} ${infusion_local_version}
+		fi
+		
+	done
+	
+	echo -e "[~] Done !\n"
+	
+}
+
+moveAllInfusions ()
+{
+	echo -e "\n[~] Move all Infusions\n"
+
+	getLocalInfusionList
+	
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do
+		checkInfusionExternal ${infusion_name}
+		infusion_external=$?
+		if [ "$infusion_external" == 0 ]; then
+			echo -e "[+] Moving ${infusion_name} to destination sd"
+			mv /pineapple/components/infusions/${infusion_name} /sd/infusions/
+			ln -s /sd/infusions/${infusion_name} /pineapple/components/infusions/${infusion_name}
+		else
+			echo -e "[+] Moving ${infusion_name} to destination internal"
+			rm /pineapple/components/infusions/${infusion_name}
+			mv /sd/infusions/${infusion_name} /pineapple/components/infusions/
+		fi
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+removeAllInfusions ()
+{
+	echo -e "\n[~] Remove all Infusions\n"
+
+	getLocalInfusionList
+	
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+		
+		infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+
+		removeInfusion ${infusion_name} ${infusion_local_version}
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+# ${destination}
+installAllInfusions ()
+{
+	echo -e "\n[~] Install all Infusions\n"
+	
+	destination=${1}
+	
+	getInfusionList
+	
+	IFS=$' '
+	for infusion_name in ${infusions_list[@]} ; do
+
+		checkInfusionExist "${infusions_list[@]}" "${infusion_name}"
+		infusion_exist=$?
+				
+		if [ "$infusion_exist" == 0 ]; then
+			echo -e "[!] Infusion ${infusion_name} does not exist remotely..."
+		else			
+			infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+			infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+			
+			installInfusion ${destination} ${infusion_name} ${infusion_version} ${infusion_type}
+		fi
+		
+	done
+	
+	echo -e "[~] Done !\n"
+}
+
+updateAllInfusions ()
+{
+	echo -e "\n[~] Update all Infusions\n"
+	
+	getLocalInfusionList
+	
+	getInfusionList
+	
+	outdated_infusions_list=()
+	IFS=$' '
+	for infusion_name in ${local_infusions_list[@]} ; do
+		
+		if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+		then
+			infusion_handler="cli_handler"
+		else
+			infusion_handler="handler"
+		fi
+		
+		infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+		infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+		
+		if [ "$infusion_version" != "$infusion_local_version" ]; then
+			outdated_infusions_list=( "${outdated_infusions_list[@]}" "${infusion_name}" )
+		fi
+	done
+		
+	if [ -z ${outdated_infusions_list} ]; then
+		echo -e "[-] No outdated Infusions"
+	else
+		IFS=$' '
+		for infusion_name in ${outdated_infusions_list[@]} ; do
+
+			checkInfusionExist "${infusions_list[@]}" "${infusion_name}"
+			infusion_exist=$?
+		
+			if [ "$infusion_exist" == 0 ]; then
+				echo -e "[!] Infusion ${infusion_name} does not exist remotely..."
+			else			
+				if [ -f "/pineapple/components/infusions/${infusion_name}/cli_handler.php" ]
+				then
+					infusion_handler="cli_handler"
+				else
+					infusion_handler="handler"
+				fi
+				
+				infusion_local_version=`cat /pineapple/components/infusions/${infusion_name}/${infusion_handler}.php | grep version | awk {'print $3'} | sed "s/'//g" | sed "s/;//g"`
+
+				infusion_type=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep type | awk -F\| '{print $2}'`
+				infusion_version=`cat /tmp/infusions_list_tmp | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -A7 ${infusion_name} | grep version | awk -F\| '{print $2}'`
+			
+				checkInfusionExternal ${infusion_name}
+				infusion_external=$?
+				if [ "$infusion_external" == 0 ]; then
+					infusion_local_destination="internal"
+				else
+					infusion_local_destination="sd"
+				fi
+			
+				removeInfusion ${infusion_name} ${infusion_local_version}
+				installInfusion ${infusion_local_destination} ${infusion_name} ${infusion_version} ${infusion_type}
+			fi
+		
+		done
+	fi
+	
+	echo -e "[~] Done !\n"
+	
+}
+
+makeMenu ()
+{
+	echo -e "[-] [I]install        --- Install Infusion(s)"
+	echo -e "[-] [U]pdate          --- Update Infusion(s)"
+	echo -e "[-] [M]ove            --- Move Infusion(s)"
+	echo -e "[-] [L]ist            --- List Infusions"
+	echo -e "[-] [R]emove          --- Remove Infusion(s)"
+	echo -e "[-] [E]xit            --- Exit"
+	echo -e ""
+	read -p "[?] Select option: "
+	
+	if [[ "$REPLY" =~ ^[Ii]$ ]]; then installInfusions; makeMenu
+	elif [[ "$REPLY" =~ ^[Uu]$ ]]; then updateInfusions; makeMenu
+	elif [[ "$REPLY" =~ ^[Mm]$ ]]; then moveInfusions; makeMenu
+	elif [[ "$REPLY" =~ ^[Ll]$ ]]; then listAllInfusions; makeMenu
+	elif [[ "$REPLY" =~ ^[Rr]$ ]]; then removeInfusions; makeMenu
+	elif [[ "$REPLY" =~ ^[Ee]$ ]]; then exit
+	else echo -e "[!] Unknow command...\n"; makeMenu
+	fi
+}
+
+usage ()
+{
+	echo -e "Phials script version 1.0 by Whistle Master"
+	echo ""
+    echo "Usage : phials [-iur] [-IUR] <infusions list> <destination>"
+    echo ""
+	echo "-i    install <infusions list> <destination>"
+	echo "-u    update <infusions list>"
+	echo "-m    move <infusions list>"
+	echo "-r    remove <infusions list>"
+	echo ""
+	echo "-I    install all infusions to <destination>"
+	echo "-U    update all infusions"
+	echo "-M    move all infusions"
+	echo "-L    list all infusions"
+	echo "-R    remove all infusions"
+	echo ""
+	echo "<destination>    sd | internal"
+	echo ""
+	echo "Example : phials -i \"networkmanager urlsnarf jammer sitesurvey dnsspoof nmap\" sd"
+	echo ""
+    exit
+}
+
+checkReq ()
+{
+	check_curl=`which curl`
+	
+	if [ -z "${check_curl}" ]; then
+	   
+	   echo -e "[!] curl isn't installed"
+	   echo -e ""
+	   read -p "[?] Would you like to install it? [Y/N]: "
+	   
+	   if [[ "$REPLY" =~ ^[Yy]$ ]]; then 
+		   opkg update
+		   
+		   sd_available=`mount | grep "on /sd"`
+		   if [ -z "${sd_available}" ]; then
+			   opkg install curl
+		   else	
+			   opkg install curl --dest sd
+		   fi
+	   else
+		   exit
+	   fi
+	   
+	fi
+}
+
+checkReq
+IFS=$' '
+
+if [ -z $1 ]; then
+   echo -e "Phials script version 1.0 by Whistle Master"
+   makeMenu
+else
+    if [[ "${1}" == "-i" ]]; then 
+		if [ -z "$2" ] || [ -z "$3" ]; then
+			usage
+		else
+			installInfusionsList "${2}" "${3}"
+		fi
+	elif [[ "${1}" == "-u" ]]; then 
+		if [ -z "$2" ]; then
+			usage
+		else
+			updateInfusionsList "${2}"
+		fi
+	elif [[ "${1}" == "-m" ]]; then 
+		if [ -z "$2" ]; then
+			usage
+		else
+			moveInfusionsList "${2}"
+		fi
+	elif [[ "${1}" == "-r" ]]; then 
+		if [ -z "$2" ]; then
+			usage
+		else
+			removeInfusionsList "${2}"
+		fi
+	elif [[ "${1}" == "-I" ]]; then 
+		if [ -z "$2" ]; then
+			usage
+		else
+			installAllInfusions "${2}"
+		fi
+	elif [[ "${1}" == "-U" ]]; then 
+		updateAllInfusions
+	elif [[ "${1}" == "-M" ]]; then 
+		moveAllInfusions
+	elif [[ "${1}" == "-L" ]]; then 
+		listAllInfusions
+	elif [[ "${1}" == "-R" ]]; then 
+		removeAllInfusions
+	else
+		usage
+	fi
+fi
+

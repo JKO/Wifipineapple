@@ -1,0 +1,869 @@
+#!/bin/sh
+#------------------------------------------------
+#Connect: A CLI Client Mode Manager
+VERSION=1.1
+#Created for the Wifi Pineapple by: SymPak
+#www.wifipineapple.com
+#forums.hak5.org
+#------------------------------------------------
+#TODO
+#Monitor connection - reconnect to essid specified on startup
+#Whitelist overwrite old entries
+#Complete disconnect function
+#Finer auto setup configuration and UCI control
+#localize variables - Work in progress
+usage () {
+	echo ""
+	echo "Connect: Command Line Infusion" "$VERSION"
+	echo "Created by: SymPak"
+	echo ""
+	echo "USAGE: pineapple infusion connect [-BRWckrs] [-i Interface] [-e ESSID] [-p Password] [-t Interface] [-b SSID] [-w SSID]..."
+	echo ""
+	echo "OPTIONS:"
+	echo "-B 		Backup /etc/config/wireless"
+	echo "-C		Add commands to be run upon successful, failed or all connections"
+	echo "-R 		Restore /etc/config/wireless from backup"
+	echo "-W		Checks for and connects to networks specified in the whitelist"
+	echo "-c		Run commands specified in commands.txt upon successful connection"
+	echo "-k		Start Karma"
+	echo "-r		Random MAC"
+	echo "-s		Check internet connection status."
+	echo "-a num	Auto retry. Specify how many failed attempts to try to connect"
+	echo "-e essid	ESSID of target wifi"
+	echo "-i iface	Interface. Default wlan1"
+	echo "-m num	Monitor connection and reconnect. Specify how many failed attempts to retry. 0=infinite"
+	echo "-p pass	Wifi Password"
+	echo "-t iface	To interface for ICS. From interface is specified with -i"
+	echo "-b essid	Blacklists AP by SSID. Scans with first available interface if no interface is specified"
+	echo "-w essid	Whitelists AP by SSID. Prompts for password when required. Password can also be set with -p"
+	exit
+}
+#------------------------------------------------
+#Cleanup of previous run
+#------------------------------------------------
+rm -f "$ERROR_LOG" "$WIFI_LIST" "$RUN_LOG" "$OPEN_WIFI" "$TEMPBLACKLIST" "$BADLIST" $TEMP_DIR/udhcpc.log $TEMP_DIR/wifi_list.debug
+#------------------------------------------------
+#Script Variables
+#------------------------------------------------
+PWD="$(dirname $0)"
+TEMP_DIR=/tmp/connect
+WIFI_LIST=$TEMP_DIR/wifi_list.tmp
+OPEN_WIFI=$TEMP_DIR/open_wifi.tmp
+CONFIG=/etc/config/wireless
+BACKUP_CONFIG=$PWD/wireless.bak
+BLACKLIST=$PWD/blacklist
+WHITELIST=$PWD/whitelist
+RUN_LOG=$TEMP_DIR/wificonnectrun.log
+ERROR_LOG=$TEMP_DIR/errorlog.tmp
+COMMANDS=$PWD/commands
+SLEEP=1
+TRIES=1
+LOOP=1
+#------------------------------------------------
+#Script start handling
+#------------------------------------------------
+while getopts ":BCDRWcdkrsa:e:i:m:p:M:w:b:t:T:S:" ARGS; do
+	case $ARGS in
+		a) RETRY="$OPTARG";; #autoretry
+		B) BACKUP=1;;
+		R) RESTORE=1;;
+		D) DEBUG=1;;
+		k) START_KARMA=1;;
+		r) RANDOM_MAC=1;;
+		i) INTERFACE="$OPTARG"; if [[ -n "$INTERFACE" ]]; then WIFI_INT="$(echo "$INTERFACE" | tr [A-Z] [a-z])"; fi;;
+		c) RUN_COMMANDS=1;;
+		d) DISCONNECT=1;;
+		e) ESSID="$OPTARG";;		
+		p) PASSWORD="$OPTARG";;
+		W) CHECK_WHITELIST=1;;
+		w) WHITE_AP="$OPTARG";;
+		b) BLACK_AP="$OPTARG";;
+		m) MONITOR="$OPTARG";;
+		M) AP_MAC="$OPTARG";;
+		s) STATUS=1;;
+		C) ADD_COMMANDS=1;;
+		t) ICS_TO="$OPTARG"; ICS=1;;
+		--help|help) usage;;
+		\?) usage;;
+		:) echo "-$OPTARG requires an argument"; usage;;
+	esac
+done
+if [[ -z "$WIFI_INT" && "$BACKUP" != "1" && "$RESTORE" != "1" ]]; then 
+	WIFI_INT="wlan1"
+fi
+if [[ -z "$RETRY" ]]; then 
+	RETRY="no"
+fi
+#Core Functions
+#-------------------------------------------------
+#Checks to see if the interface is available and
+#set up in /etc/config/wireless. Directs startup 
+#arguments to their functions
+#-------------------------------------------------
+start_check () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function start_check called"; fi
+	if [[ ! -d "$TEMP_DIR" ]]; then mkdir "$TEMP_DIR"; fi
+	if [[ "$BACKUP" == "1" ]]; then backup_config
+		if [[ -z "$WIFI_INT" ]]; then quit; fi
+	fi
+	if [[ "$RESTORE" == "1" ]]; then restore_config
+		if [[ -z "$WIFI_INT" ]]; then quit; fi
+	fi
+	if [[ "$ADD_COMMANDS" == "1" ]]; then add_commands; fi
+	if [[ -n "$BLACK_AP" ]] || [[ -n "$WHITE_AP" ]]; then 
+		if [[ -z "$WIFI_INT" ]]; then
+			WIFI_INT="$(ifconfig -a | grep -i "wlan" | awk {'print $1'} | head -n1)"
+			echo "No interface specified. Using" "$WIFI_INT"
+		fi
+	fi
+	valid_interface "$WIFI_INT"
+	if [[ "$DISCONNECT" == "1" ]]; then disconnect; fi
+	if [[ "$ICS" == "1" && -n "$ICS_TO" ]]; then valid_interface "$ICS_TO"; fi
+	if [[ "$STATUS" == "1" ]] && [[ "$(echo $@)" == "-s" ]]; then connection_status "quit"; fi
+	if [[ -n "$BLACK_AP" ]]; then set_blacklist; fi
+	if [[ -n "$WHITE_AP" ]]; then set_whitelist; fi
+	karma stop
+}
+#------------------------------------------------
+#Checks that the interfaces are valid, set up and
+#available
+#------------------------------------------------
+valid_interface () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function valid_interface called"; fi
+	if [[ "$1" == "$WIFI_INT" ]]; then
+		#INT="$(echo "$WIFI_INT" | sed 's/wlan//')"
+		if [[ "$(uci show wireless | grep device=radio | awk -F "[" {'print $2'} | awk -F "]" {'print $1'} | wc -l)" -gt "$(uci show wireless | grep device=radio | awk -F "=" {'print $2'} | uniq | wc -l)" ]]; then 
+			MANAGEMENT="yes"
+		fi
+		if [[ "$MANAGEMENT" == "yes" ]]; then
+			INT="$(ifconfig -a | grep -i 'wlan' | grep -ni "$WIFI_INT " | awk -F ":" {'print $1-1'})"
+			DEVICE="$(uci show wireless | grep -i 'wifi-iface' | grep -i 'radio' | awk -F "=" {'print $2'} | sed -n "$(( $INT + 1 ))"p | sed 's/radio//')"
+		else
+			INT="$(ifconfig -a | grep -i 'wlan' | grep -ni "$WIFI_INT " | awk -F ":" {'print $1-1'})"
+			DEVICE="$INT"
+			#DEVICE="$(uci show wireless | grep -i 'wifi-iface' | grep -i 'radio' | awk -F "=" {'print $2'} | uniq | sed -n "$INT"p | sed 's/radio//')"
+		fi
+		uci get wireless.@wifi-device[$DEVICE] 2> "$ERROR_LOG" >> "$RUN_LOG"
+		if [[ -z "$DEVICE" ]]; then echo "Interface: $INTERFACE" "Device null" >> "$ERROR_LOG"; fi
+		local i=1
+		VALID_INT="$(ifconfig -a 2> "$RUN_LOG" | awk {'print $1'} | grep -i wlan | grep -iw "$WIFI_INT" | head -n1)"
+		if [[ -z "$VALID_INT" ]]; then
+			echo "Invalid interface $WIFI_INT"
+			failed "2"
+		fi
+		while [[ -s "$ERROR_LOG" ]] && [[ $i -le 3 ]]
+		do
+			echo "/etc/config/wireless not set up for $WIFI_INT."
+			echo "Setting up /etc/config/wireless. $i of 3"
+			i=$(( $i + 1 ))
+			if [[ $i -ge 4 ]]; then quit; fi
+			wifi detect "$WIFI_INT" >> /etc/config/wireless
+			uci commit wireless
+			wifi >> "$RUN_LOG" 2>&1
+			uci get wireless.@wifi-device[$DEVICE] 2> "$ERROR_LOG" >> "$RUN_LOG"
+		done
+		DISABLED="$(uci get wireless.@wifi-device["$INT"].disabled 2> /dev/null)"
+		if [[ "$DISABLED" == 1 ]]; then
+			echo "Interface" "$WIFI_INT" "disabled. Enabling"
+			uci set wireless.@wifi-device["$INT"].disabled=0
+			uci commit wireless
+			wifi >> "$RUN_LOG" 2>&1
+		fi
+		ifconfig "$WIFI_INT" up 2> /dev/null
+		if [[ -n "$VALID_INT" && "$WIFI_INT" == "$VALID_INT" ]]; then
+			echo "Starting on $WIFI_INT"
+		else
+			echo "Invalid interface $WIFI_INT"
+			failed "2"
+		fi
+	elif [[ "$1" == "$ICS_TO" ]]; then
+		VALID_INT="$(ifconfig -a 2> "$RUN_LOG" | awk {'print $1'} | grep -i "$ICS_TO")"
+		if [[ -n "$VALID_INT" && "$ICS_TO" == "$VALID_INT" ]]; then
+			echo "Internet connection sharing will be set up between $WIFI_INT and $ICS_TO once connected"
+		else
+			echo "Invalid interface $ICS_TO"
+			unset ICS_TO
+		fi
+	fi
+}
+#------------------------------------------------------
+#Scans for wifi and saves results to wifi_list.tmp
+#------------------------------------------------------
+wifi_scan () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function wifi_scan called"; fi
+		echo "Scanning for wifi"
+		iwlist "$WIFI_INT" scan 2> "$ERROR_LOG" | egrep -i "Address:|encryption key|essid|channel:|quality|WPA2|WPA|Pairwise Ciphers" > "$WIFI_LIST"
+		local i=1
+		while [[ -s "$ERROR_LOG" ]] && [[ "$i" -le "3" ]]
+		do
+			echo "Scan not completed. Retrying. "$i" of 3"
+			ifconfig "$WIFI_INT" down 2>> "$RUN_LOG"
+			sleep 1
+			killall wpa_supplicant
+			ifconfig "$WIFI_INT" up 2>> "$RUN_LOG"
+			sleep 3
+			iwlist "$WIFI_INT" scan 2> "$ERROR_LOG" | egrep -i "Address:|encryption key|essid|channel:|quality|WPA2|WPA|Pairwise Ciphers" > "$WIFI_LIST"
+			local i=$(( $i + 1 ))
+			if [[ "$i" -ge "4" ]]; then echo "Cannot scan for wifi. Interface down or unavailable."; quit; fi
+		done
+		get_blacklist
+		cat "$WIFI_LIST" | egrep -i "Address:|encryption key|essid|channel:|quality" | grep -iB3 -A1 'encryption key:off' > "$OPEN_WIFI"
+}
+#------------------------------------------------
+#Searches for wifi and gets the specifics
+#------------------------------------------------
+get_wifi () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_wifi called"; fi
+	if [[ -n "$ESSID" ]]; then
+		AP="$(cat "$WIFI_LIST" | grep -iw "$ESSID" | head -n1 | sed 's/ESSID://;s/\"//g;s/^[ \t]*//;/^$/d')"
+		if [[ -z "$AP" ]];then
+			echo "$ESSID" "not found"
+			call_center "1"
+		fi
+	fi
+	if [[ "$CHECK_WHITELIST" == "1" ]]; then get_whitelist; fi
+	if [[ -n "$ESSID" ]]; then
+		get_encrypted_wifi
+	else
+		get_unencrypted_wifi
+	fi
+}
+#------------------------------------------------
+#Scans for an unencrypted wifi access point and
+#sets the ssid and channel
+#------------------------------------------------
+get_unencrypted_wifi () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_unencrypted_wifi called"; fi
+	if [[ -n "$ESSID" ]]; then
+		WIFI_ESSID="$ESSID"
+	else
+		WIFI_ESSID="$(cat "$OPEN_WIFI" | grep -iA1 'encryption key:off' | grep -i 'ESSID:' | sed 's/ESSID://;s/\"//g;s/^[ \t]*//;/^$/d' | head -n 1)" 
+	fi
+	if [[ -z "$WIFI_ESSID" ]]; then 
+		echo "No Wifi available. Aborting."
+		failed "1"
+	fi
+	WIFI_CHANNEL="$(cat "$OPEN_WIFI" | egrep -i 'Quality|essid|Channel:' | grep -wB3 "$WIFI_ESSID" | grep 'Channel:' | sed 's/Channel://;s/^[ \t]*//' | head -n 1)"
+	QUALITY="$(cat "$OPEN_WIFI" | egrep -i 'Quality|essid|Channel:' | grep -wB3 "$WIFI_ESSID" | grep 'Quality' | awk {'print $1'} | sed 's/Quality=//;s/\/70//' | head -n1)"
+	WIFI_BSSID="$(cat "$OPEN_WIFI" | egrep -i 'Address|essid' | grep -wB1 "$WIFI_ESSID" | grep -i 'Address:' | awk -F ': ' {'print $2'})"
+	if [[ -n "$QUALITY" ]]; then
+		WIFI_QUALITY="$(expr "$QUALITY" \* 100 / 70)%"
+	fi
+}
+#------------------------------------------------
+#Checks for an encrypted wifi access point and
+#sets the ssid, channel and encryption mode
+#------------------------------------------------
+get_encrypted_wifi () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_encrypted_wifi called"; fi
+	local ENCRYPTION_OFF="$(cat "$WIFI_LIST" | grep -iwB1 "$ESSID" | grep -i 'encryption key:off')"
+	if [[ -z "$ENCRYPTION_OFF" ]]; then
+		local WPA="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep 'WPA Version 1')"
+		local WPA2="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep 'WPA2 Version 1')"
+		if [[ -n "$WPA" ]] && [[ -n "$WPA2" ]]; then
+			local PW="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA2 Version 1' | tail -n1 | awk {'print $3'})"
+			if [[ "$PW" == "(1)" ]]; then
+				local WPA2_CIPHER="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA2 Version 1' | tail -n1 | awk {'print $5'} | tr [A-Z] [a-z])"
+			elif [[ "$PW" == "(2)" ]]; then
+				local WPA2_CIPHER="tkip+ccmp"
+			fi
+			local ENCRYPTION='mixed-psk+'"$WPA2_CIPHER"
+		elif [[ -n "$WPA2" ]]; then
+			local PW="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA2 Version 1' | tail -n1 | awk {'print $3'})"
+			if [[ "$PW" == "(1)" ]]; then
+				local WPA2_CIPHER="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA2 Version 1' | tail -n1 | awk {'print $5'} | tr [A-Z] [a-z])"
+			elif [[ "$PW" == "(2)" ]]; then
+				local WPA2_CIPHER="tkip+ccmp"
+			fi
+			local ENCRYPTION='psk2+'"$WPA2_CIPHER"
+		elif [[ -n "$WPA" ]]; then
+			local PW="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA Version 1' | tail -n1 | awk {'print $3'})"
+			if [[ "$PW" == "(1)" ]]; then
+				local WPA_CIPHER="$(cat "$WIFI_LIST" | grep -iwA7 "$ESSID" | grep -A1 'WPA Version 1' | tail -n1 | awk {'print $5'} | tr [A-Z] [a-z])"
+			elif [[ "$PW" == "(2)" ]]; then
+				local WPA_CIPHER="tkip+ccmp"
+			fi
+			local ENCRYPTION='psk+'"$WPA_CIPHER"
+		else
+			local ENCRYPTION='wep'
+		fi
+	fi
+	if [[ -n "$ENCRYPTION" ]] && [[ -z "$PASSWORD" ]]; then
+		echo "You must specify a passkey for protected wifi"
+		call_center "2"
+	else
+		WIFI_PASSWORD="$PASSWORD"
+		WIFI_ESSID="$(cat "$WIFI_LIST" | grep -iw "$ESSID" | head -n1 | sed 's/ESSID://;s/\"//g;s/^[ \t]*//;/^$/d')"
+		WIFI_ENCRYPTION="$ENCRYPTION"
+		WIFI_CHANNEL="$(cat "$WIFI_LIST" | egrep -i 'Quality|essid|Channel:' | grep -wB2 "$WIFI_ESSID" | grep Channel: | sed 's/Channel://;s/^[ \t]*//' | head -n 1)"
+		WIFI_BSSID="$(cat "$WIFI_LIST" | egrep -i 'Address|essid' | grep -wB1 "$WIFI_ESSID" | grep -i 'Address:' | awk -F ': ' {'print $2'})"
+		QUALITY="$(cat "$WIFI_LIST" | egrep -i 'Quality|essid|Channel:' | grep -wB3 "$WIFI_ESSID" | grep 'Quality' | awk {'print $1'} | sed 's/Quality=//;s/\/70//' | head -n1)"
+		if [[ -n "$QUALITY" ]]; then
+			WIFI_QUALITY="$(expr "$QUALITY" \* 100 / 70)%"
+		fi
+	fi
+}
+#------------------------------------------------
+#Checks that the ssid is not null and configures
+#the interface in /etc/config/wireless
+#------------------------------------------------
+set_wifi () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function set_wifi called"; fi
+	if [[ -z "$WIFI_ESSID" ]]; then 
+		echo "No Wifi available. Aborting."
+		failed "1"
+	else
+		echo "Connecting to "$WIFI_ESSID" on channel "$WIFI_CHANNEL" signal quality" "$WIFI_QUALITY"
+		uci set wireless.@wifi-iface[$INT].ssid="$WIFI_ESSID"
+		uci set wireless.@wifi-iface[$INT].encryption="$WIFI_ENCRYPTION"
+		uci set wireless.@wifi-iface[$INT].key="$WIFI_PASSWORD"
+		uci set wireless.@wifi-device[$DEVICE].channel="$WIFI_CHANNEL"
+		uci set wireless.@wifi-iface[$INT].network=wan
+		uci set wireless.@wifi-iface[$INT].mode=sta
+		uci set wireless.@wifi-iface[$INT].bssid="$AP_MAC"
+		uci commit wireless
+		wifi >> "$RUN_LOG" 2>&1 #Causes infusion to stay running once completed.
+		if [[ "$RANDOM_MAC" == "1" ]]; then run_macchanger; fi
+	fi
+}
+#------------------------------------------------
+#Gets an IP address
+#------------------------------------------------
+get_ip () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_ip called"; fi
+	RELEASE="$(ps -ax | grep 'udhcpc' | grep "$WIFI_INT" | awk {'print $1'})"
+	if [[ -n "$RELEASE" ]]; then
+		echo "$RELEASE" | while read line
+		do
+			kill "$line"
+		done
+	fi
+	echo "Requesting IP Address";
+	udhcpc -nqT 10 -i "$WIFI_INT" 2>> "$RUN_LOG" > "$TEMP_DIR/udhcpc.log"
+	NOLEASE="$(cat "$TEMP_DIR/udhcpc.log" | grep -i 'No lease')"
+	LEASE="$(cat "$TEMP_DIR/udhcpc.log" | grep -i 'obtained')"
+	if [[ -n "$NOLEASE" ]]; then
+		echo "Could not receive IP address"
+		IS_ASSOCIATED="$(iwconfig "$WIFI_INT" | grep 'Access Point:' | awk {'print $4'})"
+		if [[ -n "$IS_ASSOCIATED" ]] && [[ "$IS_ASSOCIATED" == "Not-Associated" ]]; then
+			echo "Could not connect to" "$WIFI_ESSID"
+		fi
+		call_center "3"
+	elif [[ -n "$LEASE" ]]; then
+		echo "Connected"
+		call_center "connected"
+	fi
+}
+#------------------------------------------------
+#Internet connection sharing (ICS)
+#------------------------------------------------
+setup_ics () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function setup_ics called"; fi
+	if [[ "$WIFI_INT" == "wlan0" ]]; then
+		ICS_FROM="$WIFI_INT"
+		if [[ -z "$ICS_TO" ]]; then ICS_TO=br-lan; fi
+	elif [[ "$WIFI_INT" == "wlan1" ]]; then
+		ICS_FROM="$WIFI_INT"
+		if [[ -z "$ICS_TO" ]]; then ICS_TO=br-lan; fi
+	fi
+	local INT_IS_VALID="$(ifconfig -a | awk {'print $1'} | grep -i "$ICS_TO")"
+	if [[ -n "$INT_IS_VALID" ]]; then
+		echo "Configuring ICS"
+		local IP_ADDR="$(ifconfig br-lan | grep 'inet addr:' | awk {'print $2'} | sed 's/addr://')"
+		local NETMASK="$(ifconfig br-lan | grep 'Mask:' | awk {'print $4'} | sed 's/Mask://')"
+		local i=1
+		while [[ $i -le 4 ]] 
+		do
+			local var1=i${i}
+			local var2=n${i}
+			local IP="$(echo "$IP_ADDR" | awk -F . {'print $('$i')'})"
+			local SM="$(echo "$NETMASK" | awk -F . {'print $('$i')'})"
+			eval ${var1}="${IP}"
+			eval ${var2}="${SM}"
+			i=$(( $i + 1 ))
+		done
+		local NETWORK_ADDRESS="$(printf "%d.%d.%d.%d\n" "$((i1 & n1))" "$((i2 & n2))" "$((i3 & n3))" "$((i4 & n4))")"
+		echo 1 > /proc/sys/net/ipv4/ip_forward
+		iptables -A FORWARD -i "$ICS_FROM" -o "$ICS_TO" -s "$NETWORK_ADDRESS" -m state --state NEW -j ACCEPT
+		iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+		iptables -t nat -A POSTROUTING -o "$ICS_FROM" -j MASQUERADE
+	else
+		echo "Cannot configure ICS. "$ICS_TO" is invalid"
+		echo "$ICS_TO may be down or disconnected"
+		echo "Please specify interface with -t"
+	fi
+}
+#------------------------------------------------
+#Call center directs calls to core functions
+#------------------------------------------------
+call_center () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function call_center called"; fi
+	if [[ "$1" == "start" || "$1" == "retry" ]]; then
+		if [[ "$1" == "retry" ]]; then
+			unset ESSID
+		fi
+		wifi_scan
+		get_wifi
+		set_wifi
+		get_ip
+	fi
+	if [[ "$1" == "1" ]]; then
+		unset ESSID
+		if [[ "$1" == "2" ]]; then
+			get_wifi
+		fi
+	fi
+	if [[ "$1" == "3" ]]; then
+		if [[ "$RUN_COMMANDS" == "1" ]]; then run_commands 2; fi
+		failed "3"
+	fi
+	if [[ "$1" == "connected" ]]; then
+		setup_ics
+		if [[ "$RUN_COMMANDS" == "1" ]]; then run_commands 1; fi
+		if [[ "$STATUS" == "1" ]]; then connection_status; fi
+		if [[ -n "$MONITOR" ]]; then connection_status; fi
+		if [[ "$WIFI_INT" == "wlan1" ]]; then
+			if [[ "$START_KARMA" == "1" ]]; then karma start; fi
+	    fi
+	fi
+}
+#------------------------------------------------
+#The function failed handles failed connections 
+#and invalid interfaces
+#------------------------------------------------
+failed () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function failed called"; fi
+	if [[ "$1" == "2" ]]; then #Invalid Interface
+		quit
+	fi
+	if [[ "$1" == "1" ]]; then #No wifi available
+		if [[ -n "$MONITOR" ]] && [[ "$RETRY" == "no" ]]; then RETRY="$MONITOR"; fi
+		if [[ "$RETRY" != "no" ]]; then
+			if [[ "$TRIES" -le "$RETRY" ]] || [[ "$RETRY" == "0" ]]; then 
+				if [[ "$LOOP" -eq "6" && -s "$BADLIST" && -n "$MONITOR" ]]; then 
+					rm -f "$BADLIST"
+					echo "Temporary blacklist removed"
+					SLEEP="1"
+					LOOP="0"
+				fi
+			fi
+			if [[ -n "$MONITOR" ]]; then LOOP=$(( $LOOP + 1 )); fi
+			TRIES=$(( $TRIES + 1 ))
+			call_center "retry" 
+		fi
+		if [[ "$RUN_COMMANDS" == "1" ]]; then run_commands 2; fi
+		quit
+	fi
+	if [[ "$1" == "3" || "$1" == "4"  ]]; then #Could not receive IP address or not connected
+		if [[ -n "$MONITOR" ]] && [[ "$RETRY" == "no" ]]; then RETRY="$MONITOR"; fi
+		if [[ "$RETRY" != "no" ]] && [[ "$TRIES" -le "$RETRY" || "$RETRY" == "0" ]]; then 
+			if [[ "$LOOP" -eq "1" && -n "$MONITOR" ]]; then
+				set_blacklist "$ESSID"
+			fi
+			if [[ -n "$MONITOR" ]]; then LOOP=$(( $LOOP + 1 )); fi
+			TRIES=$(( $TRIES + 1 ))
+			call_center "retry"
+		fi
+		quit
+	fi
+}
+#Auxiliary 
+#------------------------------------------------
+#Checks and reports on connection status. Pings
+#8.8.8.8 to test for internet connection. If the
+#pings fail, it checks for local connectivity
+#by pinging the default gateway.
+#------------------------------------------------
+connection_status () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function connection_status called"; fi
+	echo "Checking wireless status"
+	local DEFAULT_ROUTER="$(route -n | grep -i "$WIFI_INT" | awk {'print $2'} | grep -v 0.0.0.0)"
+	if [[ -n "$DEFAULT_ROUTER" ]]; then
+		local PING="$(ping -c4 8.8.8.8 | grep -i 'packet loss' | awk {'print $7'} | sed 's/%//')"
+		if [[ "$PING" -le 75 ]]; then
+			CONNECTED_TO="$(iwconfig "$WIFI_INT" | grep 'ESSID:' | awk {'print $4'} | sed 's/ESSID://;s/\"//g')"
+			echo "Connected!"
+			echo "Internet Connection: Successful"
+			echo "SSID: $CONNECTED_TO"
+		else 
+			PING="$(ping -c4 "$DEFAULT_ROUTER" | grep -i 'packet loss' | awk {'print $7'} | sed 's/%//')"
+			if [[ "$PING" -le 75 ]]; then
+				CONNECTED_TO="$(iwconfig "$WIFI_INT" | grep 'ESSID:' | awk {'print $4'} | sed 's/ESSID://;s/\"//g')"
+				echo "Local network access only"
+				echo "Internet Connection: Unavailable"
+				echo "SSID: $CONNECTED_TO"
+				failed "3"
+			else
+				echo "Not Connected.."
+				failed "4"
+			fi
+		fi
+	else
+		echo "Not Connected.."
+		failed "4"
+	fi
+	if [[ -n "$MONITOR" ]]; then
+		if [[ "$RETRY" == "no" ]]; then RETRY="$MONITOR"; fi
+		if [[ "$SLEEP" -le 5 ]]; then
+			sleep 30
+			SLEEP=$(( $SLEEP + 1 ))
+			connection_status
+		fi
+		if [[ "$SLEEP" -ge "6" ]] && [[ "$SLEEP" -le "8" ]]; then
+			sleep 300
+			SLEEP=$(( $SLEEP + 1 ))
+			connection_status
+		fi
+		if [[ "$SLEEP" -ge "9" ]]; then
+			sleep 600
+			SLEEP=$(( $SLEEP + 1 ))
+			connection_status
+		fi
+	fi
+	if [[ "$1" == "quit" ]]; then quit; fi
+}
+#------------------------------------------------
+#Backs up /etc/config/wireless
+#------------------------------------------------
+backup_config () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function backup_config called"; fi
+	if [[ -s "$BACKUP_CONFIG" ]]; then
+		echo "$BACKUP_CONFIG already exists. Overwriting"
+		rm -f "$BACKUP_CONFIG"
+		cp "$CONFIG" "$BACKUP_CONFIG"
+		if [[ -s "$BACKUP_CONFIG" ]]; then
+			echo "Wireless configuration file backed up"
+		fi
+	else
+		cp "$CONFIG" "$BACKUP_CONFIG"
+		echo "Wireless configuration file backed up"
+	fi
+}
+#------------------------------------------------
+#Restores /etc/config/wireless
+#------------------------------------------------
+restore_config () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function restore_config called"; fi
+	if [[ -s "$BACKUP_CONFIG" ]]; then
+		mv "$BACKUP_CONFIG" "$CONFIG"
+		echo "Restoring wireless configuration file"
+		uci commit wireless
+		wifi >> "$RUN_LOG" 2>&1
+		echo "Wireless configuration file restored from backup"
+	else
+		echo "$BACKUP_CONFIG not found"
+	fi
+}
+#------------------------------------------------
+#Scans for SSID and places BSSID in file
+#------------------------------------------------
+set_whitelist () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function set_whitelist called"; fi
+	wifi_scan
+	local BSSID="$(cat "$WIFI_LIST" | egrep -i 'Address:|essid' | grep -iwB1 "$WHITE_AP" | head -n1 | awk {'print $5'})"
+	local NOPASS="$(cat "$WIFI_LIST" | grep -i "$BSSID" | grep -i "encryption key: off")"
+	if [[ -z "$BSSID" ]]; then
+		echo "Cannot find" "$WHITE_AP"
+	else
+		if [[ -e "$WHITELIST" ]]; then
+			local LIST="$(cat "$WHITELIST" | grep -iw "$BSSID")"
+			if [[ -z "$LIST" && -z "$NOPASS" && -z "$PASSWORD" ]]; then
+				echo "Please specify a password (hidden) for this network or enter 'no' to abort"
+				read -s LINE
+				if [[ "$LINE" == "no" ]]; then echo "Aborting"; quit; fi
+				echo "$WHITE_AP" "$BSSID" "$LINE" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			elif [[ -z "$LIST" && -n "$PASSWORD" ]]; then
+				echo "$WHITE_AP" "$BSSID" "$PASSWORD" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			elif [[ -z "$LIST" ]]; then
+				echo "$WHITE_AP" "$BSSID" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			else
+				echo "Access point already whitelisted"
+			fi
+		else
+			touch "$WHITELIST"
+			local LIST="$(cat "$WHITELIST" | grep -iw "$BSSID")"
+			if [[ -z "$LIST" && -z "$NOPASS" && -z "$PASSWORD" ]]; then
+				echo "Please specify a password (hidden) for this network or enter 'no' to abort"
+				read -s LINE
+				if [[ "$LINE" == "no" ]]; then echo "Aborting"; quit; fi
+				#TODO add if LINE is null loop
+				echo "$WHITE_AP" "$BSSID" "$LINE" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			elif [[ -z "$LIST" && -n "$PASSWORD" ]]; then
+				echo "$WHITE_AP" "$BSSID" "$PASSWORD" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			elif [[ -z "$LIST" ]]; then
+				echo "$WHITE_AP" "$BSSID" >> "$WHITELIST"
+				echo "$WHITE_AP added to whitelist"
+			else
+				echo "Access point already whitelisted"
+			fi
+		fi
+	fi
+	quit
+}
+#------------------------------------------------
+#Checks wifi_list.tmp for whitelisted APs
+#------------------------------------------------
+get_whitelist () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_whitelist called"; fi
+	if [[ -s "$WHITELIST" && -z "$ESSID" ]]; then
+		echo "Checking for protected whitelisted APs"
+		while read line
+		do
+			if [[ -n "$(echo "$line" | awk {'print $3'})" ]]; then
+				local WHITELISTAP="$(echo "$line" | awk {'print $2'})"
+				local APFOUND="$(cat "$WIFI_LIST" | grep -iw "$WHITELISTAP")"
+				if [[ -n "$APFOUND" ]]; then
+					ESSID="$(cat "$WIFI_LIST" | egrep -i 'Address:|ESSID:' | grep -iwA1 "$WHITELISTAP" | grep -i "ESSID:" | sed 's/ESSID://;s/\"//g;s/^[ \t]*//;/^$/d')"
+					PASSWORD="$(echo "$line" | awk {'print $3'})"
+					echo "Found protected AP "$ESSID" in whitelist."
+					break
+				fi
+			fi
+		done < "$WHITELIST"
+		if [[ -z "$ESSID" ]]; then echo "No protected APs in range"; fi
+	fi
+	if [[ -s "$WHITELIST" && -z "$ESSID" ]]; then
+		echo "Checking for any whitelisted APs"
+		while read line
+		do
+			if [[ -z "$ESSID" && -z $(echo "$line" | awk {'print $3'}) ]]; then
+				local WHITELISTAP="$(echo "$line" | awk {'print $2'})"
+				local APFOUND="$(cat "$WIFI_LIST" | grep -iw "$WHITELISTAP")"
+				if [[ -n "$APFOUND" ]]; then
+					ESSID="$(cat "$WIFI_LIST" | grep -iw "$WHITELISTAP" | sed 's/ESSID://;s/\"//g;s/^[ \t]*//;/^$/d')"
+					echo "Found unprotected AP "$ESSID" in whitelist."
+					break
+				fi
+			fi
+		done < "$WHITELIST"
+		if [[ -z "$ESSID" ]]; then 
+			echo "No unprotected APs in range"
+			echo "Checking for available wifi"
+		fi
+	else
+		if [[ ! -s "$WHITELIST" ]]; then echo "Whitelist empty"; fi
+	fi
+}
+#------------------------------------------------
+#Finds the BSSID of an AP and puts it in 
+#blacklist.txt
+#------------------------------------------------
+set_blacklist () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function set_blacklist called"; fi
+	wifi_scan
+	BSSID="$(cat "$WIFI_LIST" | egrep -i 'Address:|essid' | grep -iwB1 "$BLACK_AP" | head -n1 | awk {'print $5'})"
+	if [[ -n "$(echo $@)" ]]; then
+		BADLIST=$TEMP_DIR/badlist.tmp
+		BSSID="$(cat "$WIFI_LIST" | egrep -i 'Address:|essid' | grep -iwB1 "$(echo $@)" | head -n1 | awk {'print $5'})"
+		BLACK_AP="$(echo $@)"
+		echo "$BLACK_AP" "$BSSID" >> "$BADLIST"
+		echo "$BLACK_AP added to temporary blacklist"
+	fi
+	if [[ -z "$BSSID" ]] && [[ -z "$(echo $@)" ]]; then
+		echo "Cannot find" "$BLACK_AP"
+	elif [[ -z "$(echo $@)" ]]; then
+		if [[ -e "$BLACKLIST" ]]; then
+			if [[ ! -s "$BLACKLIST" ]]; then
+				echo "$BLACK_AP" "$BSSID" >> "$BLACKLIST"
+				echo "$BLACK_AP added to blacklist"
+			else
+				echo "$BLACK_AP already blacklisted"
+			fi
+		else
+			touch "$BLACKLIST"
+			if [[ ! -s "$BLACKLIST" ]]; then
+				echo "$BLACK_AP" "$BSSID" >> "$BLACKLIST"
+				echo "$BLACK_AP added to blacklist"
+			else
+				echo "$BLACK_AP already blacklisted"
+			fi
+		fi
+	fi
+	if [[ -z "$(echo $@)" ]]; then quit; fi
+}
+#------------------------------------------------
+#Blacklists local interfaces so the pineapple
+#doesn't connect to itself. Also checks for and
+#applies user configurable blacklists from
+#blacklist.txt
+#------------------------------------------------
+get_blacklist () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function get_blacklist called"; fi
+	TEMPBLACKLIST=$TEMP_DIR/blacklist.tmp
+	rm "$TEMPBLACKLIST" 2> /dev/null
+	TEMPWIFILIST=$TEMP_DIR/new_wifi_list.tmp
+	LIST="$(cat "$BLACKLIST" 2> /dev/null)"
+	ifconfig -a | awk {'print $1'} | grep -i "wlan" | while read line
+	do
+    	ifconfig "$line" 2> /dev/null | grep -i 'hwaddr' | awk {'print $5'} >> "$TEMPBLACKLIST"
+	done
+	cat "$BADLIST" 2> /dev/null | while read line
+	do
+    	echo "$line" | awk {'print $2'} >> "$TEMPBLACKLIST"
+	done
+	if [[ -n "$LIST" ]]; then
+		#echo "Applying user blacklist"
+		cat "$BLACKLIST" | while read line
+		do
+			echo "$line" | awk {'print $2'} >> "$TEMPBLACKLIST"
+		done
+	fi
+	cat "$TEMPBLACKLIST" | while read line
+	do
+		BLKLST="$(echo "$line")"
+		if [[ -n "$BLKLST" ]]; then
+			#echo "Blacklist empty"
+		#elif [[ -n "cat "$WIFI_LIST" | grep -i "$BLKLST" | sed 's/^[ \t]*//'" ]]; then
+			cat "$WIFI_LIST" | sed -e "/${BLKLST}/{p;N;N;N;N;d}" | sed "/${BLKLST}/d" > "$TEMPWIFILIST"
+			rm -f "$WIFI_LIST" 
+			mv "$TEMPWIFILIST" "$WIFI_LIST"
+		fi
+	done
+}
+#------------------------------------------------
+#Macchanger changes MAC of the wlan interfaces to
+#a random vendor MAC
+#------------------------------------------------
+run_macchanger () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function run_macchanger called"; fi
+	ifconfig -a | awk {'print $1'} | grep -i "wlan" | while read line
+	do
+    	echo "Changing MAC on" "$line"
+		ifconfig "$line" down
+		macchanger -A "$line"
+		ifconfig "$line" up
+		sleep 1
+	done
+}
+#------------------------------------------------
+#Starts and stops karma
+#------------------------------------------------
+karma () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function karma called"; fi
+	WLAN0_MODE="$(uci get wireless.@wifi-iface[0].mode | tr [A-Z] [a-z])"
+	if [[ "$1" == "start" ]] && [[ "$WLAN0_MODE" == "ap" ]]; then
+		echo "Starting karma"
+		hostapd_cli -p /var/run/hostapd-phy0 karma_enable >> "$RUN_LOG" 2> "$ERROR_LOG"
+		if [[ -s "$ERROR_LOG" ]]; then echo "Karma error. Check that wlan0 is up and in AP mode."; fi
+	elif [[ "$1" == "stop" ]] && [[ "$WLAN0_MODE" == "ap" ]]; then
+		echo "Stopping karma"
+		hostapd_cli -p /var/run/hostapd-phy0 karma_disable >> "$RUN_LOG" 2> "$ERROR_LOG"
+		if [[ -s "$ERROR_LOG" ]]; then echo "Karma error. Check that wlan0 is up and in AP mode."; fi
+	fi
+}
+#------------------------------------------------
+#Add commands to commands file
+#------------------------------------------------
+add_commands () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function add_commands called"; fi
+	if [[ -e "$COMMANDS" ]]; then
+		echo "Would you like the command to run once connected, upon failed connection or both?"
+		echo "Possible variables that can be passed: \"\$ESSID\" \"\$PASSWORD\" \"\$PWD\" \"\$WIFI_BSSID\" \"\$WIFI_CHANNEL\" \"\$WIFI_INT\""
+		echo "Note: use quotes when passing variables"
+		echo "Enter 'connected', 'failed', 'both' or enter 'no' to abort"
+		read LINE
+		if [[ "$LINE" == "no" ]]; then echo "Aborting"; quit; fi
+		L="$(echo "$LINE" | tr [A-Z] [a-z])"
+		if [[ "$L" == "connected" ]]; then LINE="1"; elif [[ "$L" == "failed" ]]; then LINE="2"; elif [[ "$L" == "both" ]]; then LINE="0"; fi
+		echo "Enter a command to be run or enter 'no' to abort"
+		read LINE2
+		if [[ "$LINE2" == "no" ]]; then echo "Aborting"; quit; fi
+		echo "$LINE" "$LINE2" >> "$COMMANDS"
+		echo "Command added"
+		echo "Would you like to add another command? 'yes' or 'no'"
+		read CONTINUE
+		if [[ "$CONTINUE" == "yes" ]]; then 
+			add_commands
+		else
+			echo "Quitting."
+		fi
+		quit
+	else
+		touch "$COMMANDS"
+		echo "Created" "$COMMANDS"
+		add_commands
+	fi
+}
+#------------------------------------------------
+#Run commands after successful connection.
+#------------------------------------------------
+run_commands () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function run_commands called"; fi
+	CONNECTED=$1
+	if [[ -e "$COMMANDS" ]]; then
+		if [[ "$CONNECTED" == "1" ]]; then
+			echo "Running connected commands"
+			cat "$COMMANDS" | grep -e '0' -e '1' | awk {'$1=""; print $0'} | while read line
+			do
+				COMMAND="$(echo "$line")"
+				eval echo "Command:" "$COMMAND"
+				eval "$COMMAND"
+			done
+		elif [[ "$CONNECTED" == "2" ]]; then
+			echo "Running failed connection commands"
+			cat "$COMMANDS" | grep -e '0' -e '2' | awk {'$1=""; print $0'} | while read line
+			do
+				COMMAND="$(echo "$line")"
+				eval echo "Command:" "$COMMAND"
+				eval "$COMMAND"
+			done
+		fi
+	else
+		touch "$COMMANDS"
+		echo "Created" "$COMMANDS"
+	fi
+}
+#------------------------------------------------
+#Disconnects from wifi.
+#------------------------------------------------
+disconnect () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function disconnect called"; fi
+	echo "Disconnecting" "$WIFI_INT" "please wait..."
+	RELEASE="$(ps -ax | grep 'udhcpc' | grep "$WIFI_INT" | awk {'print $1'})"
+	if [[ -n "$RELEASE" ]]; then
+		echo "$RELEASE" | while read line
+		do
+			kill "$line"
+		done
+	fi
+	uci delete wireless.@wifi-iface[$INT].key
+	uci delete wireless.@wifi-iface[$INT].encryption
+	uci set wireless.@wifi-iface[$INT].mode=sta
+  	uci set wireless.@wifi-iface[$INT].network=lan
+	uci set wireless.@wifi-iface[$INT].ssid=' '
+	uci commit wireless
+	wifi 2> /dev/null
+	ifconfig "$WIFI_INT" down 2> /dev/null
+	echo "$WIFI_INT" "disconnected"
+	quit
+}
+#------------------------------------------------
+#Garbage cleanup and exiting the script
+#------------------------------------------------
+quit () {
+	if [[ "$DEBUG" == "1" ]]; then echo "DEBUG: Function quit called"; fi
+	if [[ "$DEBUG" != "1" ]]; then
+		rm -f "$ERROR_LOG" "$WIFI_LIST" "$RUN_LOG" "$OPEN_WIFI" "$TEMPBLACKLIST" "$BADLIST" $TEMP_DIR/udhcpc.log $TEMP_DIR/wifi_list.debug
+	else
+		mv "$WIFI_LIST" $TEMP_DIR/wifi_list.debug
+	fi
+	#echo "If the script does not complete after 'Done.' press control-c"
+	echo "Done."
+	sleep 2
+	if [[ -n "$(ps -ax | grep "$PPID" | grep -i 'pineapple infusion connect')" ]]; then
+		kill "$PPID"
+	fi
+	exit
+}
+#------------------------------------------------
+#Function calls
+#------------------------------------------------
+date
+start_check	"$@"
+call_center "start"
+quit

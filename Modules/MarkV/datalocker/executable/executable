@@ -1,0 +1,386 @@
+#!/usr/bin/python
+
+# Executable for command-line integration
+# Version 1.0
+# Newbi3
+
+import sys
+import subprocess
+import base64
+import os
+import string
+import random
+import sqlite3
+import hashlib
+
+from datetime import datetime
+
+# Define Colors
+purple = "\033[95m"
+blue = "\033[94m"
+green = "\033[92m"
+yellow = "\033[93m"
+red = "\033[91m"
+reset = "\033[0m"
+
+# Current date
+DATE = str(datetime.now())
+
+#database path
+DB_PATH = "/pineapple/components/infusions/datalocker/includes/database/tracker.db"
+
+def execute(cmd):
+	""" Execute a command and show the output live """
+	toRun = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, bufsize=0)
+	return toRun.communicate()
+
+
+def checkDepends():
+	""" This function will check if dependencies are installed """
+	output = execute("opkg list-installed python-crypto")[0]
+	if output == "":
+		print yellow + "MISSING DEPENDENCIES! USE THE \"deps\" OPTION TO INSTALL THEM\n" + reset
+		return False
+	else:
+		return True
+
+
+def installDepends():
+	""" This function will install dependencies """
+	output = execute("opkg update && opkg install python-crypto")[0]
+	print blue + "[ OPKG ] " + output + reset
+	print green + "Finished installing dependencies" + reset
+
+
+def createTrackingDB():
+	""" This function checks to see if the database exists and creates it if it does not """
+	if not os.path.isfile(DB_PATH):
+		conn = sqlite3.connect(DB_PATH)
+		c = conn.cursor()
+		c.execute("CREATE TABLE tracking (file TEXT, algorithm TEXT, date TEXT, key TEXT)")
+		conn.commit()
+		conn.close()
+
+
+def startTracking(file, algo, key):
+	""" This function will start tracking a file """
+	createTrackingDB()
+	conn = sqlite3.connect(DB_PATH)
+	c = conn.cursor()
+	c.execute("INSERT INTO tracking VALUES('" + file + "', '" + algo + "', '" + DATE + "', '" + hashKey(file, key) + "')")
+	conn.commit()
+	conn.close()
+
+
+def stopTracking(file):
+	""" This function removes a file from tracking list """
+	createTrackingDB()
+	conn = sqlite3.connect(DB_PATH)
+	c = conn.cursor()
+	c.execute("DELETE FROM tracking WHERE file == '" + file + "'")
+	conn.commit()
+	conn.close()
+
+
+def listTracking():
+	""" This functions shows a list of all encrypted files """
+	print green + "File" + "\tEncryption" + "\tDate" + reset
+	createTrackingDB()
+	conn = sqlite3.connect(DB_PATH)
+	c = conn.cursor()
+	c.execute("SELECT * FROM tracking")
+	rows = c.fetchall()
+	for row in rows:
+		print blue + row[0] + "\t" + row[1] + "\t" + row[2] + reset
+	conn.close()
+
+
+def tracker(mode):
+	""" Do file tracking stuff and what not """
+	if mode == "list" or mode == "ls":
+		listTracking()
+	elif mode == "delete" or mode == "del":
+		try:
+			stopTracking(sys.argv[3])
+			print green + "Stopped trackig " + sys.argv[3] + reset
+		except:
+			print red + "usage: datalocker delete <file>" + reset
+	else:
+		print red + "Unkown mode please use \"list\" or \"delete\"" + reset
+
+
+def shredFile(shredThis):
+	""" This function will shred a file """
+	for i in range(0, 20):
+		data = "01"
+		count = 2
+		f = open(shredThis, 'rb+')
+		f.read()
+		count = file.tell(f)
+		data = data*(count/2)
+		f.seek(0)
+		f.write(data)
+		f.close()
+	newName = ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase) for _ in range(8))
+	os.rename(shredThis, newName)
+	os.unlink(newName)
+	return green + "File shreded sucessfully!" + reset
+
+
+def hashKey(file, key):
+	""" This function will hash the key for storing """
+	return hashlib.sha512(file + key).hexdigest()
+
+
+def checkKey(file, key):
+	""" This functions checks the key to make sure it is the same """
+	try:
+		newHash = hashKey(file, key)
+		conn = sqlite3.connect(DB_PATH)
+		c = conn.cursor()
+		c.execute("SELECT key FROM tracking WHERE file == '" + file + "'")
+		hashedKey = c.fetchone()
+		conn.close()
+
+		if hashedKey[0] != "":
+			if newHash == hashedKey[0]:
+				return True
+			else:
+				return False
+		else:
+			return True	# I return true here because the key might not be stored in the database
+	except:
+		return True
+
+
+def padKey(length, key):
+	""" This function checks if the key length is long enough """
+	if len(key) != length:
+		padding = "`"
+		padLen = (length - len(key)%length) % length
+		key = padding*(padLen/2)+key+padding*(padLen-padLen/2)
+		return key
+	else:
+		#print red + "Your key must be " + str(length) + " characters long not " + str(len(key)) + "!" + reset
+		return key
+
+
+def encryptFile(mode, key, file):
+	""" This function will encrypt a file """
+	try:
+		if not os.path.isfile(file):
+			print red + "File does not exist: " + str(file) + reset
+			return False
+
+		from Crypto.Cipher import AES
+		blocksize = 0
+		if mode.lower() == "aes128":
+			blocksize = 16
+		elif mode.lower() == "aes256":
+			blocksize = 32
+		else:
+			print red + "Usage: pineapple infusion datalocker encryptfile <AES128/AES256> <KEY> <PATH TO FILE>" + reset
+			return False
+
+		if not len(key) > blocksize:		
+			key = padKey(blocksize, key)
+
+			padding = '`'
+			pad = lambda s: s + (blocksize - len(s) % blocksize) * padding
+			cipher = AES.new(key)
+			encrypt = lambda c, s: base64.b64encode(c.encrypt(pad(s)))
+			
+			with open(file, 'rb') as infile:
+				with open(file + ".encrypted", 'wb') as outfile:
+					while True:
+						chunk = infile.read(65536)
+						if len(chunk) == 0:
+							break
+						outfile.write(encrypt(cipher, chunk))
+				outfile.close()
+			infile.close()
+			startTracking(file + ".encrypted", mode, key)
+			shredFile(file)
+			print green + "File encrypted successfully!" + reset
+		else:
+			print red + "Your key is to long! AES128 length is 1-16 characters and AES256 length is 1-32 characters" + reset
+
+	except Exception, e:
+		print red + str(e) + reset
+
+
+def decryptFile(mode, key, file):
+	""" This function will decrypt a file """
+	try:
+		if not os.path.isfile(file):
+			print red + "File does not exist: " + str(file) + reset
+			return False
+
+		from Crypto.Cipher import AES
+		blocksize = 0
+		if mode.lower() == "aes128":
+			blocksize = 16
+		elif mode.lower() == "aes256":
+			blocksize = 32
+		else:
+			print red + "Usage: pineapple infusion datalocker decryptfile <AES128/AES256> <KEY> <PATH TO FILE>" + reset
+
+		key = padKey(blocksize, key)
+
+		if checkKey(file, key):		
+			padding = '`'
+			cipher = AES.new(key)
+			decrypt = lambda c, e: c.decrypt(base64.b64decode(e)).rstrip(padding) 
+		
+			toDecrypt = open(file, 'rb')
+			data = toDecrypt.read(65536)
+			toDecrypt.close()
+
+			newFile = open(file[:-10], 'wb')
+			newFile.write(decrypt(cipher, data))
+			newFile.close()
+			stopTracking(file)
+			shredFile(file)
+
+			print green + "File decrypted successfully!" + reset
+		else:
+			print red + "The key given was not the key used to encrypt this file." + reset
+
+	except Exception, e:
+		print red + str(e) + reset
+
+
+def encryptString(mode, key, message):
+	""" This function will encrypt a string """
+	try:
+		from Crypto.Cipher import AES
+		blocksize = 0
+		if mode.lower() == "aes128":
+			blocksize = 16
+		elif mode.lower() == "aes256":
+			blocksize = 32
+		else:
+			print red + "Usage: pineapple infusion datalocker encryptstring <AES128/AES256> <KEY> <\"YOUR MESSAGE IN QOUTES\">" + reset
+			return False
+		
+		key = padKey(blocksize, key)
+		padding = '`'
+		pad = lambda s: s + (blocksize - len(s) % blocksize) * padding
+		cipher = AES.new(key)
+		encrypt = lambda c, s: base64.b64encode(c.encrypt(pad(s)))
+		print encrypt(cipher, message)
+				
+	except Exception, e:
+		print red + str(e) + reset
+
+
+def decryptString(mode, key, data):
+	""" This function will decrypt a string """
+	try:
+		from Crypto.Cipher import AES
+		blocksize = 0
+		if mode.lower() == "aes128":
+			blocksize = 16
+		elif mode.lower() == "aes256":
+			blocksize = 32
+		else:
+			print red + "Usage: pineapple infusion datalocker decryptstring <AES128/AES256> <KEY> <AES ENCRYPTED MESSAGE>" + reset
+			return False
+		
+		key = padKey(blocksize, key)
+		padding = '`'
+		cipher = AES.new(key)
+		decrypt = lambda c, e: c.decrypt(base64.b64decode(e)).rstrip(padding)
+		print decrypt(cipher, data)
+		
+	except Exception, e:
+		print red + str(e) + reset
+
+
+def help():
+	""" Show usage info """
+	print "\n\t\t\t" + red + "Data Locker" + reset + "\n"
+	
+	print yellow + "WHEN A FILE IS ENCRYPTED THE PLAIN-TEXT VERSION IS DELETED!" + reset
+	print yellow + "WHEN A FILE IS DECRYPTED THE ENCRYPTED VERSION IS DELETED!\n" + reset
+
+	options = ['help\t\t\t\t\t\t', 'deps\t\t\t\t\t\t', 'tracker <list/delete>\t\t\t\t', 'shred <file>\t\t\t\t\t', 'encryptfile <aes128/aes256> <key> <file>\t',
+		'decryptfile <aes128/aes256> <key> <file>\t', 'encryptstring <aes128/aes256 <key> <\"STRING\">\t',
+		'decryptstring <aes128/aes256> <key> <\"AES\">\t']
+
+	descrip = ['shows help menu', 'installs dependencies (python-crypto)', 'lists encrypted files', 'overwrites a file 20 times and deletes it',
+		'encrypts a file with specified encryption', 'decrypts a file with specified encryption', 
+		'encrypts a string with specified encryption', 'decrypts an AES encrypted string']
+
+	if len(options) == len(descrip):
+		print green + "OPTION\t\t\t\t\t\tDESCRIPTION" + reset
+		for i in range(0, len(options)):
+			print blue + options[i] + descrip[i] + reset
+
+
+def handleArgs(args):
+	""" Handle different arguments """
+	try:
+		cmd = args[1].lower()
+	
+		if cmd != "deps":	# Check if dependencies are installed
+			checkDepends()
+
+		if cmd == "help":
+			help()
+			
+		elif cmd == "deps":
+			installDepends()
+			
+		elif cmd == "shred":
+			try:
+				print shredFile(args[2])
+			except Exception, e:
+				print red + "Error shreding file: " + str(e) + reset
+	
+		elif cmd == "encryptfile":
+			try:
+				encryptFile(args[2], args[3], args[4])
+			except:
+				print red + "Usage: pineapple infusion datalocker encryptfile <AES128/AES256> <KEY> <PATH TO FILE>" + reset
+	
+		elif cmd == "decryptfile":
+			try:
+				decryptFile(args[2], args[3], args[4])
+			except:
+				print red + "Usage: pineapple infusion datalocker decryptfile <AES128/AES256> <KEY> <PATH TO FILE>" + reset
+		
+		elif cmd == "encryptstring":
+			try:
+				encryptString(args[2], args[3], args[4])
+			except:
+				print red + "Usage: pineapple infusion datalocker encryptstring <AES128/AES256> <KEY> <\"YOUR MESSAGE IN QOUTES\">" + reset
+			
+		elif cmd == "decryptstring":
+			try:
+				decryptString(args[2], args[3], args[4])
+			except:
+				print red + "Usage: pineapple infusion datalocker decryptstring <AES128/AES256> <KEY> <AES ENCRYPTED MESSAGE>" + reset
+
+		elif cmd == "tracker":
+			try:
+				tracker(args[2])
+			except:
+				print red + "Unkown mode please use \"list\" or \"delete\"" + reset
+		
+		else:
+			help()
+			
+	except Exception, e:
+		#print red + "Error: " + str(e)
+		checkDepends()
+		help()
+
+
+def main(args):
+	""" Start the program """
+	argList = sys.argv
+	handleArgs(args)
+	print reset
+
+main(sys.argv)

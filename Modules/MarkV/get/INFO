@@ -1,0 +1,29 @@
++-------------------------------------------------------+
+| Name:     get                                         |
+| Version:  2.4                                         |
+| Author:   SilverExploit                               |
+| Reviver: dustbyter                                    |
+| NOTE: This infusion was lost somewhere between fw     |
+|       version 2.5.0 and 2.8.0. I have updated it to   |
+|       work with 2.8.0+. It may work with older        |
+|       versions, but I have not tested it.             |
++-------------------------------------------------------+
+|             Description                               |
+|                                                       |
+| Get is a module that uses javascript and PHP to       |
+| find several information about the client's browser   |
+| and OS and saves them to a 'database' file. For now   |
+| this module supports IP, browser type, OS type,       |
+| Geolocation (if you have permissions it shows the     |
+| coordinates ), MAC, Username, etc. It also detects    |
+| browser plugins and MIMEs (the different| file formats|
+| and the applications associated with them). The hosts |
+| are recognized by MAC address. No duplicate data will |
+| be recorded on the database if the data for that host |
+| already exists, but it will add the data if the person|
+| visits with a new browser or makes changes to the old |
+| browser.                                              |
++-------------------------------------------------------+
+
+
+

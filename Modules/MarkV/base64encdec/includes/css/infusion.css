@@ -1,0 +1,93 @@
+.navbar {
+    font-family:monospace;
+    top:10px;
+    min-width:100%;
+    background:green;
+        border-top-left-radius: 10px 10px;
+        border-top-right-radius: 10px 10px;
+        border-bottom-left-radius: 10px 10px;
+        border-bottom-right-radius: 10px 10px;
+    text-align:center;
+    color:black;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+
+
+.all table {
+        background-color: #222;
+        border-radius: 5px;
+        border: 3px #555 solid;
+        margin:3px;
+        padding: 2px;
+}
+
+.all a {color: green;}
+.all td {border: none;}
+.all tr:nth-child(odd) {background-color: #333; }
+.all tr:nth-child(1) {background-color: #DDD; color:#000;}
+
+
+body {
+        background-color: #000;
+        color: white;
+}
+
+
+.all {padding-top: 10px;}
+
+
+.all .m #main {
+        color:#5fba3d;
+        font-family:monospace, prestige;
+        background-color: #000;
+        border-radius: 10px;
+        width:95%;
+        min-width:400px;
+        font-size: 12px;
+}
+
+
+.all .m table {width:100%;}
+.all .m #header {
+        background-color:#000;
+        border-top-right-radius: 5px;
+        border-top-left-radius: 5px;
+}
+
+
+.all .m #header table {
+        color: black;
+}
+
+
+
+.all .m #content table {
+        background-color: #EEE;
+        padding: 2px;
+        color: black;
+        font-size: 14px;
+}
+.all .m a {color:#5fba3d;}
+.all .m td {border: 0px; margin: 0px; }
+.all .m td:nth-child(1) {width:22%;}
+.all .m td:nth-child(2) {width:22%;}
+.all .m td:nth-child(3) {width:22%;}
+.all .m #content tr:nth-child(odd) {background-color: #DDD; }
+.all .m #footer {}
+
+
+#installer {
+padding: 5px;
+font-size: 13px;
+font-family:monospace, prestige;
+}
+
+.input_text {
+        border-radius:5px;
+        padding:2px; 
+        color:green; 
+        width:200px; 
+        border:1px 
+        solid green; margin:none;
+}
